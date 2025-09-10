@@ -1,20 +1,63 @@
-from pyrogram import filters
-from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message, CallbackQuery
+from pyrogram import Client, filters
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from config import ADMIN_IDS, LOG_CHANNEL
+from database import add_user, set_premium, remove_premium, get_user, get_premium_users
+import datetime
 
-from config import ADMIN_IDS, PLANS, LOG_CHANNEL
-from database import add_premium, remove_premium, is_premium, get_premium_list, premium_col, purchase_col
-from utils import ts_now, premium_required
+def premium_required(func):
+    async def wrapper(client, message):
+        user = await get_user(message.from_user.id)
+        if not user or not user.get("premium"):
+            return await message.reply("❌ You are not a premium user. Contact admin to subscribe.")
+        return await func(client, message)
+    return wrapper
 
-# Register all handlers here
-def register_handlers(app):
-    @app.on_message(filters.private & filters.command("start"))
-    async def start_handler(client, message: Message):
-        text = "Welcome! Choose a plan to buy or check status."
+def register_handlers(app: Client):
+    @app.on_message(filters.command("start"))
+    async def start_cmd(client, message):
+        await add_user(message.from_user.id)
+        await message.reply("👋 Welcome! Use /buy to purchase premium.")
+
+    @app.on_message(filters.command("buy"))
+    async def buy_cmd(client, message):
         kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("View Plans", callback_data="view_plans")],
-            [InlineKeyboardButton("My Status", callback_data="my_status")]
+            [InlineKeyboardButton("💳 Buy 1 Month – ₹100", callback_data="buy_1m")],
+            [InlineKeyboardButton("💳 Buy 3 Months – ₹250", callback_data="buy_3m")],
         ])
-        await message.reply_text(text, reply_markup=kb)
+        await message.reply("Select a plan:", reply_markup=kb)
 
-    # Other handlers (buy flow, admin commands, callbacks, screenshots) copied from previous code
-    # ...
+    @app.on_callback_query(filters.regex(r"buy_"))
+    async def buy_plan(client, query):
+        plan = query.data
+        duration = {"buy_1m": 30, "buy_3m": 90}[plan]
+        expiry = datetime.datetime.now() + datetime.timedelta(days=duration)
+        if LOG_CHANNEL:
+            await client.send_message(LOG_CHANNEL, f"📝 {query.from_user.mention} requested {plan} plan.")
+        await query.message.reply(f"Send payment screenshot to admin.\nPlan: {duration} days.\nExpiry: {expiry:%Y-%m-%d}")
+
+    @app.on_message(filters.command("addpremium") & filters.user(ADMIN_IDS))
+    async def add_premium_cmd(client, message):
+        try:
+            user_id = int(message.command[1])
+            days = int(message.command[2])
+        except:
+            return await message.reply("Usage: /addpremium user_id days")
+        expiry = datetime.datetime.now() + datetime.timedelta(days=days)
+        await set_premium(user_id, expiry)
+        await message.reply(f"✅ Premium given to {user_id} for {days} days.")
+
+    @app.on_message(filters.command("removepremium") & filters.user(ADMIN_IDS))
+    async def remove_premium_cmd(client, message):
+        try:
+            user_id = int(message.command[1])
+        except:
+            return await message.reply("Usage: /removepremium user_id")
+        await remove_premium(user_id)
+        await message.reply(f"❌ Premium removed from {user_id}.")
+
+    @app.on_message(filters.command("premiumlist") & filters.user(ADMIN_IDS))
+    async def premium_list(client, message):
+        text = "👑 Premium Users:\n"
+        async for user in get_premium_users():
+            text += f"- {user['user_id']} (Expiry: {user['expiry']})\n"
+        await message.reply(text)
